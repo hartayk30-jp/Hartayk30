@@ -1,0 +1,133 @@
+// ==UserScript==
+// @name         Glance Screenshot Assistant
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Capture screen regions and ask Gemini AI about them
+// @author       You
+// @match        *://*/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @connect      generativelanguage.googleapis.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Configuration
+    const CONFIG = {
+        apiKey: GM_getValue('geminiApiKey', ''),
+        model: GM_getValue('model', 'gemini-2.5-flash-lite'),
+        detail: GM_getValue('detail', 1024),
+        maxTokens: GM_getValue('maxTokens', 600),
+        humanize: GM_getValue('humanize', true)
+    };
+
+    // Create floating UI
+    const panel = document.createElement('div');
+    panel.id = 'glance-panel';
+    panel.innerHTML = `
+        <div style="position:fixed;bottom:20px;right:20px;z-index:9999;background:#1f2327;color:#e4e7ea;padding:15px;border-radius:12px;border:1px solid #333a42;width:300px;font-family:system-ui;">
+            <h3 style="margin:0 0 10px 0;font-size:16px;">Glance</h3>
+            <textarea id="glance-prompt" placeholder="Ask about the page..." style="width:100%;background:#17191c;color:#e4e7ea;border:1px solid #333a42;border-radius:8px;padding:8px;min-height:60px;"></textarea>
+            <div style="display:flex;gap:8px;margin-top:10px;">
+                <button id="glance-capture" style="flex:1;background:#93a8c0;color:#12161a;border:0;padding:9px;border-radius:8px;font-weight:600;cursor:pointer;">Capture & Ask</button>
+                <button id="glance-settings" style="background:#272c32;color:#e4e7ea;border:1px solid #333a42;padding:9px 12px;border-radius:8px;cursor:pointer;">⚙️</button>
+            </div>
+            <div id="glance-status" style="margin-top:10px;font-size:13px;color:#8d96a0;"></div>
+            <div id="glance-reply" style="margin-top:10px;max-height:300px;overflow-y:auto;white-space:pre-wrap;font-size:14px;line-height:1.5;display:none;"></div>
+        </div>
+    `;
+    document.body.appendChild(panel);
+
+    // Settings modal
+    document.getElementById('glance-settings').addEventListener('click', () => {
+        const key = prompt('Enter your Gemini API key:', CONFIG.apiKey);
+        if (key !== null) {
+            CONFIG.apiKey = key.trim();
+            GM_setValue('geminiApiKey', CONFIG.apiKey);
+        }
+    });
+
+    // Capture and analyze
+    document.getElementById('glance-capture').addEventListener('click', async () => {
+        if (!CONFIG.apiKey) {
+            alert('Please set your Gemini API key first (click ⚙️)');
+            return;
+        }
+
+        const status = document.getElementById('glance-status');
+        status.textContent = 'Capturing page...';
+
+        try {
+            // Capture visible viewport
+            const canvas = await html2canvas(document.body, {
+                width: window.innerWidth,
+                height: window.innerHeight,
+                windowWidth: window.innerWidth,
+                windowHeight: window.innerHeight
+            });
+
+            // Downscale
+            const scale = Math.min(1, CONFIG.detail / Math.max(canvas.width, canvas.height));
+            const small = document.createElement('canvas');
+            small.width = canvas.width * scale;
+            small.height = canvas.height * scale;
+            small.getContext('2d').drawImage(canvas, 0, 0, small.width, small.height);
+
+            const base64 = small.toDataURL('image/jpeg', 0.72).split(',')[1];
+            const question = document.getElementById('glance-prompt').value.trim() || 
+                           "What's on my screen? If it shows a question, error, or task, answer or solve it.";
+
+            status.textContent = 'Asking Gemini...';
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(CONFIG.model)}:generateContent`,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': CONFIG.apiKey
+                },
+                data: JSON.stringify({
+                    systemInstruction: { parts: [{ text: 'You read screenshots and answer briefly. Plain text only, no markdown.' }] },
+                    contents: [{
+                        role: 'user',
+                        parts: [
+                            { inline_data: { mime_type: 'image/jpeg', data: base64 } },
+                            { text: question }
+                        ]
+                    }],
+                    generationConfig: { maxOutputTokens: CONFIG.maxTokens, temperature: 0.5 }
+                }),
+                onload: (response) => {
+                    try {
+                        const json = JSON.parse(response.responseText);
+                        const text = (json.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
+                        
+                        const replyDiv = document.getElementById('glance-reply');
+                        replyDiv.textContent = text;
+                        replyDiv.style.display = 'block';
+                        status.textContent = '';
+                    } catch (e) {
+                        status.textContent = 'Error parsing response';
+                    }
+                },
+                onerror: () => {
+                    status.textContent = 'Request failed';
+                }
+            });
+
+        } catch (error) {
+            status.textContent = 'Capture failed: ' + error.message;
+        }
+    });
+
+    // Keyboard shortcut: Ctrl+Shift+G
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.shiftKey && e.key === 'G') {
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        }
+    });
+
+})();
